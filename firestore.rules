@@ -36,6 +36,12 @@ service cloud.firestore {
              data.entry.size() > 0;
     }
 
+    // App config document (admin settings, URLs, master key)
+    match /config/{docId} {
+      allow read: if true;
+      allow write: if isValidId(docId);
+    }
+
     // Default deny catch-all
     match /{document=**} {
       allow read, write: if false;

@@ -1,0 +1,6 @@
+{
+  "firestore": {
+    "database": "ai-studio-frkingaura-0d9229bf-2c3f-4ee5-9a7b-ea472e66dd2f",
+    "rules": "firestore.rules"
+  }
+}
