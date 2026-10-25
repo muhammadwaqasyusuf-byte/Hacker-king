@@ -15,15 +15,9 @@ import {
   Check,
   Database,
 } from 'lucide-react';
-import {
-  saveLicenseToFirestore,
-  updateLicenseInFirestore,
-  deleteLicenseFromFirestore,
-  fetchLicensesFromFirestore,
-} from '../services/firebaseDb.ts';
 
 export const AdminView: React.FC = () => {
-  const { navigateTo, setAuthSettingsOpen, setIsAdmin, appConfig } = useBot();
+  const { navigateTo, setAuthSettingsOpen, setIsAdmin } = useBot();
 
   const [passwordInput, setPasswordInput] = useState<string>('');
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
@@ -34,6 +28,7 @@ export const AdminView: React.FC = () => {
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [cardEdits, setCardEdits] = useState<Record<string, { duration: string; devices: number }>>({});
   const [copiedKeyId, setCopiedKeyId] = useState<string | null>(null);
+  const [databaseConnected, setDatabaseConnected] = useState<boolean | null>(null);
 
   // Mint New Key Modal State
   const [isMintModalOpen, setIsMintModalOpen] = useState<boolean>(false);
@@ -48,11 +43,19 @@ export const AdminView: React.FC = () => {
   });
   const [isMinting, setIsMinting] = useState<boolean>(false);
 
+  const refreshDatabaseStatus = async () => {
+    try {
+      const res = await fetch('/api/health');
+      const data = await res.json();
+      setDatabaseConnected(res.ok && data.database?.connected === true);
+    } catch (error) {
+      console.error('Failed to check MongoDB connection:', error);
+      setDatabaseConnected(false);
+    }
+  };
+
   const fetchKeys = async (pwd = passwordInput) => {
     setErrorMessage('');
-    let mergedKeys: LicenseDetails[] = [];
-    let authenticated = false;
-
     try {
       const res = await fetch('/api/admin/keys', {
         method: 'POST',
@@ -60,52 +63,27 @@ export const AdminView: React.FC = () => {
         body: JSON.stringify({ password: pwd }),
       });
       const data = await res.json();
-      if (data.ok && Array.isArray(data.keys)) {
-        mergedKeys = [...data.keys];
-        authenticated = true;
-      } else if (res.status === 401) {
+      if (!res.ok || !data.ok || !Array.isArray(data.keys)) {
         setErrorMessage(data.error || 'Wrong admin password.');
         setIsAuthenticated(false);
         setIsAdmin(false);
         sessionStorage.removeItem('frk_admin');
         return;
       }
-    } catch {
-      // Backend may be offline or in serverless cold start
-    }
-
-    // Also sync from Firestore cloud database
-    try {
-      const firestoreKeys = await fetchLicensesFromFirestore();
-      if (firestoreKeys && firestoreKeys.length > 0) {
-        const keyMap = new Map<string, LicenseDetails>();
-        for (const k of mergedKeys) {
-          keyMap.set(k.license_key.toUpperCase(), k);
-        }
-        for (const fk of firestoreKeys) {
-          if (!keyMap.has(fk.license_key.toUpperCase())) {
-            keyMap.set(fk.license_key.toUpperCase(), fk);
-          }
-        }
-        mergedKeys = Array.from(keyMap.values());
-      }
-    } catch (e) {
-      console.warn('Firestore keys sync warning:', e);
-    }
-
-    if (authenticated || mergedKeys.length > 0) {
-      setKeysList(mergedKeys);
+      setKeysList(data.keys);
       setIsAuthenticated(true);
       setIsAdmin(true);
       sessionStorage.setItem('frk_admin', pwd);
-    } else {
-      setErrorMessage('Could not load license database. Check admin credentials.');
+    } catch (error) {
+      console.error('Failed to load admin licenses:', error);
+      setErrorMessage('Unable to connect to the server. Check MongoDB connectivity and try again.');
       setIsAuthenticated(false);
       setIsAdmin(false);
     }
   };
 
   useEffect(() => {
+    refreshDatabaseStatus();
     const saved = sessionStorage.getItem('frk_admin');
     if (saved) {
       setPasswordInput(saved);
@@ -173,9 +151,11 @@ export const AdminView: React.FC = () => {
         }),
       });
       const data = await res.json();
-      if (data.ok) {
+      if (res.ok && data.ok) {
         if (data.license) {
-          saveLicenseToFirestore(data.license).catch(() => {});
+          setKeysList((prev) => prev.map((license) => (
+            license.id === data.license.id ? data.license : license
+          )));
         }
         setSuccessMessage(`Device "${deviceToken}" unlinked successfully.`);
         setTimeout(() => setSuccessMessage(null), 3000);
@@ -238,25 +218,14 @@ export const AdminView: React.FC = () => {
         }),
       });
       const data = await res.json();
-      if (data.ok) {
+      if (res.ok && data.ok) {
         if (action === 'delete') {
-          // Wait for the cloud delete to fully complete BEFORE refetching,
-          // otherwise fetchKeys() merges the still-existing Firestore doc
-          // back into the list (the "deleted key reappears" bug).
-          const cloudOk = await deleteLicenseFromFirestore(licId).catch(() => false);
-          if (!cloudOk) {
-            setErrorMessage('Local delete succeeded, but cloud delete failed. The key may reappear on next refresh — try deleting again.');
-          } else {
-            setSuccessMessage('License key deleted successfully from server and cloud.');
-          }
+          setSuccessMessage('License key deleted successfully.');
         } else if (action === 'reset_devices') {
-          updateLicenseInFirestore(licId, { license_devices: [] }).catch(() => {});
           setSuccessMessage('All bound devices reset successfully for this key.');
         } else if (action === 'block') {
-          updateLicenseInFirestore(licId, { status: 'blocked' }).catch(() => {});
           setSuccessMessage('License blocked successfully.');
         } else if (action === 'approve') {
-          if (data.license) saveLicenseToFirestore(data.license).catch(() => {});
           setSuccessMessage('License approved/updated successfully in database.');
         }
         setTimeout(() => setSuccessMessage(null), 3000);
@@ -285,10 +254,7 @@ export const AdminView: React.FC = () => {
         }),
       });
       const data = await res.json();
-      if (data.ok) {
-        if (data.license) {
-          saveLicenseToFirestore(data.license).catch(() => {});
-        }
+      if (res.ok && data.ok) {
         setIsMintModalOpen(false);
         setSuccessMessage('New key minted and approved successfully!');
         setTimeout(() => setSuccessMessage(null), 3000);
@@ -433,47 +399,16 @@ export const AdminView: React.FC = () => {
           </div>
         </div>
 
-        {/* Live Firebase Firestore Database Status */}
-        <div className="p-3 mb-3 rounded-xl bg-[#00D68F]/10 border border-[#00D68F]/30 text-xs flex items-center justify-between">
+        <div className={`p-3 mb-3 rounded-xl border text-xs flex items-center justify-between ${
+          databaseConnected
+            ? 'bg-[#00D68F]/10 border-[#00D68F]/30'
+            : 'bg-[#FF4D6D]/10 border-[#FF4D6D]/30'
+        }`}>
           <div className="flex items-center gap-2">
-            <Database size={15} className="text-[#00D68F]" />
-            <span className="font-bold text-[#00D68F] flex items-center gap-1.5">
-              <span>Firebase Firestore Live Database Active</span>
-              <span className="w-2 h-2 rounded-full bg-[#00D68F] animate-pulse" />
+            <Database size={15} className={databaseConnected ? 'text-[#00D68F]' : 'text-[#FF4D6D]'} />
+            <span className={`font-bold ${databaseConnected ? 'text-[#00D68F]' : 'text-[#FF4D6D]'}`}>
+              {databaseConnected === null ? 'Checking MongoDB connection…' : databaseConnected ? 'MongoDB connected' : 'MongoDB unavailable'}
             </span>
-          </div>
-          <span className="font-mono text-[10px] text-[#B8B8B8]">
-            Project: unified-park-zbcxw
-          </span>
-        </div>
-
-        {/* Quick Master API Key Banner */}
-        <div className="p-3.5 mb-4 rounded-xl bg-[#151515]/90 border border-[#8D7210]/50 text-xs">
-          <div className="flex items-center justify-between mb-2">
-            <span className="font-semibold text-[#FFD000] flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider">
-              <KeyRound size={13} />
-              <span>Admin Quick Test Keys (Private Reference)</span>
-            </span>
-            <span className="text-[10px] text-[#777777] font-mono">
-              Database Synced
-            </span>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {appConfig?.apiKey && (
-              <button
-                onClick={() => copyToClipboard(appConfig.apiKey, 'master-test')}
-                className="px-2.5 py-1 rounded bg-[#2A2208] border border-[#8D7210]/60 hover:bg-[#3A2F0C] text-[#FFE166] font-mono text-[11px] flex items-center gap-1.5 cursor-pointer"
-                title="Copy Master API Key"
-              >
-                <span>Master API Key: {appConfig.apiKey}</span>
-                {copiedKeyId === 'master-test' ? (
-                  <Check size={11} className="text-[#00D68F]" />
-                ) : (
-                  <Copy size={11} />
-                )}
-              </button>
-            )}
           </div>
         </div>
 

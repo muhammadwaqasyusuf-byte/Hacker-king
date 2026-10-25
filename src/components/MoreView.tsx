@@ -58,8 +58,8 @@ export const MoreView: React.FC = () => {
               >
                 <KeyRound className="text-[#FFD000]" />
                 <div>
-                  <strong>API Key & Auth Settings</strong>
-                  <small>Configure custom API key, Supabase, or auth mode</small>
+                  <strong>API & MongoDB Settings</strong>
+                  <small>Manage the master key, admin password, and MongoDB status</small>
                 </div>
               </button>
 

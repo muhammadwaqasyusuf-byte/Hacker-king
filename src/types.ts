@@ -28,11 +28,6 @@ export interface SignalItem {
 }
 
 export interface AppConfig {
-  apiKey: string;
-  recoveryEmail: string;
-  supabaseUrl: string;
-  supabaseAnonKey: string;
-  authMode: 'local' | 'api_key_only' | 'supabase_sync';
   allowMasterApiKeyBypass: boolean;
   whatsappUrl?: string;
   telegramUrl?: string;

@@ -1,50 +1,14 @@
-import fs from 'fs';
-import path from 'path';
+import { randomInt, randomUUID } from 'node:crypto';
+import {
+  getConfigCollection,
+  getLicensesCollection,
+  getSignalsCollection,
+  License,
+  SignalRecord,
+  AppConfig,
+} from './mongo';
 
-export interface License {
-  id: string;
-  license_key: string;
-  full_name: string;
-  phone: string;
-  email: string;
-  amount: string;
-  status: 'pending' | 'approved' | 'blocked';
-  duration_label: string;
-  expires_at: string | null;
-  lifetime: boolean;
-  max_devices: number;
-  license_devices: string[];
-  created_at: string;
-  updated_at: string;
-}
-
-export interface SignalRecord {
-  id: string;
-  pair: string;
-  market: string;
-  timer: string;
-  mode: 'live' | 'future';
-  direction: 'BUY' | 'SELL';
-  entry: string;
-  expiry: string;
-  accuracy: string;
-  strength: string;
-  created_at: string;
-}
-
-export interface AppConfig {
-  apiKey: string;
-  recoveryEmail: string;
-  supabaseUrl: string;
-  supabaseAnonKey: string;
-  authMode: 'local' | 'api_key_only' | 'supabase_sync';
-  allowMasterApiKeyBypass: boolean;
-  adminPassword?: string;
-  whatsappUrl: string;
-  telegramUrl: string;
-  phone: string;
-  developer: string;
-}
+export type { License, SignalRecord, AppConfig };
 
 export interface DatabaseSchema {
   config: AppConfig;
@@ -52,175 +16,137 @@ export interface DatabaseSchema {
   signals: SignalRecord[];
 }
 
-const isServerless = Boolean(
-  process.env.VERCEL ||
-  process.env.AWS_LAMBDA_FUNCTION_NAME ||
-  process.env.LAMBDA_TASK_ROOT
-);
-
-const BUNDLED_DATA_DIR = path.resolve(process.cwd(), 'data');
-const BUNDLED_DB_FILE = path.join(BUNDLED_DATA_DIR, 'frking.db.json');
-
-// In serverless / read-only environments, use /tmp as the writable storage directory
-const DATA_DIR = isServerless ? '/tmp' : BUNDLED_DATA_DIR;
-const DB_FILE = isServerless ? path.join('/tmp', 'frking.db.json') : BUNDLED_DB_FILE;
-
-const DEFAULT_CONFIG: AppConfig = {
-  apiKey: process.env.API_KEY || 'FRK-PRO-MASTER-KEY-2026',
-  recoveryEmail: process.env.RECOVERY_EMAIL || 'emailwaqas7@gmail.com',
-  supabaseUrl: process.env.SUPABASE_URL || '',
-  supabaseAnonKey: process.env.SUPABASE_ANON_KEY || '',
-  authMode: (process.env.AUTH_MODE as any) || (process.env.SUPABASE_URL ? 'supabase_sync' : 'local'),
-  allowMasterApiKeyBypass: process.env.ALLOW_MASTER_KEY_BYPASS !== 'false',
-  adminPassword: process.env.ADMIN_PASSWORD || 'FRK@2026#WaqasKing!Secure9x',
+export const DEFAULT_CONFIG: AppConfig = {
+  apiKey: process.env.API_KEY || '',
+  recoveryEmail: process.env.RECOVERY_EMAIL || '',
+  allowMasterApiKeyBypass: process.env.ALLOW_MASTER_KEY_BYPASS === 'true',
+  adminPassword: process.env.ADMIN_PASSWORD || '',
   whatsappUrl: process.env.WHATSAPP_URL || 'https://chat.whatsapp.com/G1yKmNVIntiLx7c9KX5zEu',
   telegramUrl: process.env.TELEGRAM_URL || 'https://t.me/frking00',
   phone: process.env.PHONE || '+966554573612',
   developer: process.env.DEVELOPER || '@codetrader',
 };
 
-function calculateExpiry(durationLabel: string): { expires_at: string | null; lifetime: boolean } {
-  if (durationLabel === 'Lifetime') {
-    return { expires_at: null, lifetime: true };
-  }
-  const now = Date.now();
-  const dayMs = 24 * 60 * 60 * 1000;
-  let ms = 30 * dayMs;
+let legacyConfigCleanup: Promise<void> | null = null;
 
-  switch (durationLabel) {
-    case '1 Day': ms = 1 * dayMs; break;
-    case '2 Days': ms = 2 * dayMs; break;
-    case '3 Days': ms = 3 * dayMs; break;
-    case '5 Days': ms = 5 * dayMs; break;
-    case '1 Week': ms = 7 * dayMs; break;
-    case '15 Days': ms = 15 * dayMs; break;
-    case '1 Month': ms = 30 * dayMs; break;
-    case '3 Months': ms = 90 * dayMs; break;
-    case '6 Months': ms = 180 * dayMs; break;
-    case '1 Year': ms = 365 * dayMs; break;
-    default: ms = 30 * dayMs; break;
-  }
+function calculateExpiry(durationLabel: string): {
+  expires_at: string | null;
+  lifetime: boolean;
+} {
+  if (durationLabel === 'Lifetime') return { expires_at: null, lifetime: true };
+
+  const durationDays: Record<string, number> = {
+    '1 Day': 1,
+    '2 Days': 2,
+    '3 Days': 3,
+    '5 Days': 5,
+    '1 Week': 7,
+    '15 Days': 15,
+    '1 Month': 30,
+    '3 Months': 90,
+    '6 Months': 180,
+    '1 Year': 365,
+  };
+  const days = durationDays[durationLabel];
+  if (!days) throw new Error('Unsupported license duration.');
 
   return {
-    expires_at: new Date(now + ms).toISOString(),
+    expires_at: new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString(),
     lifetime: false,
   };
 }
 
+function makeId(): string {
+  return `lic_${randomUUID()}`;
+}
+
+function toLicense(doc: Omit<License, 'id'> & { id?: string; _id?: { toString(): string } }): License {
+  const { _id, ...license } = doc;
+  const id = license.id || _id?.toString();
+  if (!id) throw new Error('MongoDB license record is missing its identifier.');
+  return { ...license, id } as License;
+}
+
+function toSignal(doc: Omit<SignalRecord, 'id'> & { id?: string; _id?: { toString(): string } }): SignalRecord {
+  const { _id, ...signal } = doc;
+  const id = signal.id || _id?.toString();
+  if (!id) throw new Error('MongoDB signal record is missing its identifier.');
+  return { ...signal, id } as SignalRecord;
+}
+
 class Database {
-  private data: DatabaseSchema;
-
-  constructor() {
-    this.data = this.load();
-  }
-
-  private load(): DatabaseSchema {
-    // 1. Try reading existing DB_FILE (e.g. /tmp/frking.db.json or data/frking.db.json)
-    try {
-      if (fs.existsSync(DB_FILE)) {
-        const raw = fs.readFileSync(DB_FILE, 'utf-8');
-        const parsed = JSON.parse(raw);
-        return {
-          config: { ...DEFAULT_CONFIG, ...(parsed.config || {}) },
-          licenses: parsed.licenses || [],
-          signals: parsed.signals || [],
-        };
-      }
-    } catch (err) {
-      console.warn('Could not read from primary DB_FILE:', err);
+  public async getConfig(): Promise<AppConfig> {
+    const col = await getConfigCollection();
+    if (!legacyConfigCleanup) {
+      legacyConfigCleanup = col.updateOne(
+        { _id: 'app' },
+        { $unset: { supabaseUrl: '', supabaseAnonKey: '', authMode: '' } },
+      ).then(() => undefined).catch((error: unknown) => {
+        legacyConfigCleanup = null;
+        throw error;
+      });
     }
-
-    // 2. In serverless / read-only, read bundled seed data if DB_FILE is in /tmp
-    if (DB_FILE !== BUNDLED_DB_FILE) {
-      try {
-        if (fs.existsSync(BUNDLED_DB_FILE)) {
-          const raw = fs.readFileSync(BUNDLED_DB_FILE, 'utf-8');
-          const parsed = JSON.parse(raw);
-          const initialData: DatabaseSchema = {
-            config: { ...DEFAULT_CONFIG, ...(parsed.config || {}) },
-            licenses: parsed.licenses || [],
-            signals: parsed.signals || [],
-          };
-          this.persist(initialData);
-          return initialData;
-        }
-      } catch (err) {
-        console.warn('Could not read from BUNDLED_DB_FILE:', err);
-      }
-    }
-
-    const initial: DatabaseSchema = {
-      config: DEFAULT_CONFIG,
-      // No hardcoded license keys — all keys are created dynamically via
-      // /api/register-key (user registration) or /api/admin/create-key (admin).
-      licenses: [],
-      signals: [],
+    await legacyConfigCleanup;
+    const doc = await col.findOne({ _id: 'app' });
+    if (!doc) return { ...DEFAULT_CONFIG };
+    return {
+      ...DEFAULT_CONFIG,
+      apiKey: typeof doc.apiKey === 'string' ? doc.apiKey : DEFAULT_CONFIG.apiKey,
+      recoveryEmail: typeof doc.recoveryEmail === 'string' ? doc.recoveryEmail : DEFAULT_CONFIG.recoveryEmail,
+      allowMasterApiKeyBypass: typeof doc.allowMasterApiKeyBypass === 'boolean'
+        ? doc.allowMasterApiKeyBypass
+        : DEFAULT_CONFIG.allowMasterApiKeyBypass,
+      adminPassword: typeof doc.adminPassword === 'string' ? doc.adminPassword : DEFAULT_CONFIG.adminPassword,
+      whatsappUrl: typeof doc.whatsappUrl === 'string' ? doc.whatsappUrl : DEFAULT_CONFIG.whatsappUrl,
+      telegramUrl: typeof doc.telegramUrl === 'string' ? doc.telegramUrl : DEFAULT_CONFIG.telegramUrl,
+      phone: typeof doc.phone === 'string' ? doc.phone : DEFAULT_CONFIG.phone,
+      developer: typeof doc.developer === 'string' ? doc.developer : DEFAULT_CONFIG.developer,
     };
-
-    this.persist(initial);
-    return initial;
   }
 
-  private persist(data: DatabaseSchema) {
-    try {
-      if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-      }
-      fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf-8');
-    } catch (err: any) {
-      // If primary path failed (e.g. read-only filesystem), fallback to /tmp
-      if (DATA_DIR !== '/tmp') {
-        try {
-          if (!fs.existsSync('/tmp')) fs.mkdirSync('/tmp', { recursive: true });
-          fs.writeFileSync('/tmp/frking.db.json', JSON.stringify(data, null, 2), 'utf-8');
-          return;
-        } catch {}
-      }
-      console.warn('Database in-memory persistence active (file write skipped):', err?.message || err);
-    }
-  }
-
-  public getConfig(): AppConfig {
-    return { ...this.data.config };
-  }
-
-  public updateConfig(updates: Partial<AppConfig>): AppConfig {
-    this.data.config = {
-      ...this.data.config,
-      ...updates,
-    };
-    this.persist(this.data);
+  public async updateConfig(updates: Partial<AppConfig>): Promise<AppConfig> {
+    const col = await getConfigCollection();
+    await col.updateOne({ _id: 'app' }, { $set: updates }, { upsert: true });
     return this.getConfig();
   }
 
-  public getLicenses(): License[] {
-    return this.data.licenses;
+  public async getLicenses(): Promise<License[]> {
+    const col = await getLicensesCollection();
+    const docs = await col.find({}).sort({ created_at: -1 }).toArray();
+    return docs.map(toLicense);
   }
 
-  public addOrUpdateLicense(lic: License): void {
-    const idx = this.data.licenses.findIndex(
-      (l) => l.id === lic.id || l.license_key === lic.license_key
+  public async addOrUpdateLicense(license: License): Promise<void> {
+    const col = await getLicensesCollection();
+    await col.updateOne(
+      { id: license.id },
+      { $set: license },
+      { upsert: true },
     );
-    if (idx >= 0) {
-      this.data.licenses[idx] = { ...this.data.licenses[idx], ...lic };
-    } else {
-      this.data.licenses.unshift(lic);
-    }
-    this.persist(this.data);
   }
 
-  public findLicenseByKey(key: string): License | undefined {
+  public async findLicenseByKey(key: string): Promise<License | null> {
     const cleanKey = key.trim().toUpperCase();
-    return this.data.licenses.find(
-      (lic) => lic.license_key.trim().toUpperCase() === cleanKey
+    const col = await getLicensesCollection();
+    const doc = await col.findOne(
+      { license_key: cleanKey },
+      { collation: { locale: 'en', strength: 2 } },
     );
+    if (doc) return toLicense(doc);
+
+    const byId = await col.findOne({ id: cleanKey });
+    return byId ? toLicense(byId) : null;
   }
 
-  public findLicenseById(id: string): License | undefined {
-    return this.data.licenses.find((lic) => lic.id === id || lic.license_key === id);
+  public async findLicenseById(id: string): Promise<License | null> {
+    const col = await getLicensesCollection();
+    const doc = await col.findOne({
+      $or: [{ id }, { license_key: id.toUpperCase() }],
+    }, { collation: { locale: 'en', strength: 2 } });
+    return doc ? toLicense(doc) : null;
   }
 
-  public createLicense(input: {
+  public async createLicense(input: {
     custom_key?: string;
     full_name: string;
     phone: string;
@@ -229,22 +155,15 @@ class Database {
     duration?: string;
     max_devices?: number;
     status?: 'pending' | 'approved' | 'blocked';
-  }): License {
-    const rawKey = input.custom_key?.trim().toUpperCase();
-    let licenseKey = rawKey;
-
-    if (!licenseKey) {
-      const part1 = Math.floor(1000 + Math.random() * 9000);
-      const part2 = Math.floor(1000 + Math.random() * 9000);
-      const part3 = Math.floor(1000 + Math.random() * 9000);
-      licenseKey = `FRK-${part1}-${part2}-${part3}`;
-    }
-
+  }): Promise<License> {
+    const licenseKey =
+      input.custom_key?.trim().toUpperCase() ||
+      `FRK-${randomInt(1000, 10000)}-${randomInt(1000, 10000)}-${randomInt(1000, 10000)}`;
     const durationLabel = input.duration || '1 Month';
     const { expires_at, lifetime } = calculateExpiry(durationLabel);
 
-    const newLic: License = {
-      id: `lic_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    const newLicense: License = {
+      id: makeId(),
       license_key: licenseKey,
       full_name: input.full_name.trim(),
       phone: input.phone.trim(),
@@ -252,131 +171,152 @@ class Database {
       amount: input.amount.trim() || 'Paid',
       status: input.status || 'pending',
       duration_label: durationLabel,
-      expires_at: expires_at,
-      lifetime: lifetime,
-      max_devices: input.max_devices || 1,
+      expires_at,
+      lifetime,
+      max_devices: input.max_devices ?? 1,
       license_devices: [],
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
 
-    this.data.licenses.unshift(newLic);
-    this.persist(this.data);
-    return newLic;
+    const col = await getLicensesCollection();
+    try {
+      await col.insertOne(newLicense);
+    } catch (error) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        error.code === 11000
+      ) {
+        throw new Error('A license with this key already exists.');
+      }
+      throw error;
+    }
+    return newLicense;
   }
 
-  public updateLicenseAction(
+  public async updateLicenseAction(
     idOrKey: string,
     action: string,
     duration?: string,
     maxDevices?: number,
-    deviceId?: string
-  ): { ok: boolean; error?: string; license?: License } {
-    const licIndex = this.data.licenses.findIndex(
-      (lic) => lic.id === idOrKey || lic.license_key === idOrKey
-    );
+    deviceId?: string,
+  ): Promise<{ ok: boolean; error?: string; license?: License }> {
+    const license = await this.findLicenseById(idOrKey);
+    if (!license) return { ok: false, error: 'License not found.' };
 
-    if (licIndex === -1) {
-      return { ok: false, error: 'License not found.' };
-    }
-
-    const lic = this.data.licenses[licIndex];
+    const updates: Partial<License> = { updated_at: new Date().toISOString() };
 
     if (action === 'delete') {
-      this.data.licenses.splice(licIndex, 1);
-      this.persist(this.data);
-      return { ok: true };
+      const col = await getLicensesCollection();
+      const result = await col.deleteOne({ id: license.id });
+      return result.deletedCount === 1
+        ? { ok: true }
+        : { ok: false, error: 'License not found.' };
     }
-
     if (action === 'approve') {
-      lic.status = 'approved';
+      updates.status = 'approved';
       if (duration) {
-        lic.duration_label = duration;
         const expiry = calculateExpiry(duration);
-        lic.expires_at = expiry.expires_at;
-        lic.lifetime = expiry.lifetime;
+        updates.duration_label = duration;
+        updates.expires_at = expiry.expires_at;
+        updates.lifetime = expiry.lifetime;
       }
-      if (maxDevices !== undefined && maxDevices > 0) {
-        lic.max_devices = maxDevices;
-      }
-      lic.updated_at = new Date().toISOString();
+      if (maxDevices !== undefined) updates.max_devices = maxDevices;
     } else if (action === 'block') {
-      lic.status = 'blocked';
-      lic.updated_at = new Date().toISOString();
+      updates.status = 'blocked';
     } else if (action === 'reset_devices') {
-      lic.license_devices = [];
-      lic.updated_at = new Date().toISOString();
+      updates.license_devices = [];
     } else if (action === 'remove_device' && deviceId) {
-      lic.license_devices = (lic.license_devices || []).filter(
-        (d) => d.trim().toLowerCase() !== deviceId.trim().toLowerCase()
+      updates.license_devices = (license.license_devices || []).filter(
+        (device) => device.toLowerCase() !== deviceId.trim().toLowerCase(),
       );
-      lic.updated_at = new Date().toISOString();
     } else {
       return { ok: false, error: `Unknown action: ${action}` };
     }
 
-    this.persist(this.data);
-    return { ok: true, license: lic };
+    const col = await getLicensesCollection();
+    const result = await col.updateOne({ id: license.id }, { $set: updates });
+    if (result.matchedCount !== 1) return { ok: false, error: 'License not found.' };
+
+    const updatedLicense = await this.findLicenseById(license.id);
+    return updatedLicense
+      ? { ok: true, license: updatedLicense }
+      : { ok: false, error: 'Updated license could not be read.' };
   }
 
-  public bindDevice(licKey: string, deviceId: string): { ok: boolean; error?: string; license?: License } {
-    const cleanKey = licKey.trim().toUpperCase();
-    const lic = this.findLicenseByKey(cleanKey);
-
-    if (!lic) {
-      return { ok: false, error: 'License key not found.' };
+  public async bindDevice(
+    licenseKey: string,
+    deviceId: string,
+  ): Promise<{ ok: boolean; error?: string; license?: License }> {
+    const license = await this.findLicenseByKey(licenseKey);
+    if (!license) return { ok: false, error: 'License key not found.' };
+    if (license.status !== 'approved') {
+      return {
+        ok: false,
+        error: license.status === 'blocked'
+          ? 'This license has been blocked by administrator.'
+          : 'Payment verification pending. Please wait for admin approval.',
+      };
     }
-
-    if (lic.status === 'blocked') {
-      return { ok: false, error: 'This license has been blocked by administrator.' };
-    }
-
-    if (lic.status === 'pending') {
-      return { ok: false, error: 'Payment verification pending. Please wait for admin approval.' };
-    }
-
-    if (!lic.lifetime && lic.expires_at && new Date(lic.expires_at) < new Date()) {
+    if (!license.lifetime && license.expires_at && new Date(license.expires_at) < new Date()) {
       return { ok: false, error: 'License key expired. Please contact admin to renew.' };
     }
 
-    if (!lic.license_devices) {
-      lic.license_devices = [];
+    const normalizedDevice = deviceId.trim();
+    if (license.license_devices.some((device) => device.toLowerCase() === normalizedDevice.toLowerCase())) {
+      return { ok: true, license };
     }
 
-    const hasDevice = lic.license_devices.some(
-      (d) => d.trim().toLowerCase() === deviceId.trim().toLowerCase()
+    const col = await getLicensesCollection();
+    const updatedAt = new Date().toISOString();
+    const result = await col.updateOne(
+      {
+        id: license.id,
+        status: 'approved',
+        license_devices: { $ne: normalizedDevice },
+        $expr: {
+          $lt: [
+            { $size: { $ifNull: ['$license_devices', []] } },
+            { $ifNull: ['$max_devices', 1] },
+          ],
+        },
+      },
+      {
+        $addToSet: { license_devices: normalizedDevice },
+        $set: { updated_at: updatedAt },
+      },
     );
 
-    if (!hasDevice) {
-      if (lic.license_devices.length >= lic.max_devices) {
-        return {
-          ok: false,
-          error: `Device limit reached (${lic.license_devices.length}/${lic.max_devices} bound). Please ask admin to reset devices or upgrade limit.`,
-        };
+    const currentLicense = await this.findLicenseById(license.id);
+    if (!currentLicense) return { ok: false, error: 'License not found.' };
+    if (result.matchedCount === 0) {
+      if (currentLicense.license_devices.some((device) => device.toLowerCase() === normalizedDevice.toLowerCase())) {
+        return { ok: true, license: currentLicense };
       }
-      lic.license_devices.push(deviceId.trim());
-      lic.updated_at = new Date().toISOString();
-      this.persist(this.data);
+      return {
+        ok: false,
+        error: `Device limit reached (${currentLicense.license_devices.length}/${currentLicense.max_devices} bound). Please ask admin to reset devices or upgrade limit.`,
+      };
     }
-
-    return { ok: true, license: lic };
+    return { ok: true, license: currentLicense };
   }
 
-  public addSignal(sig: Omit<SignalRecord, 'created_at'>): SignalRecord {
+  public async addSignal(signal: Omit<SignalRecord, 'created_at'>): Promise<SignalRecord> {
     const record: SignalRecord = {
-      ...sig,
+      ...signal,
       created_at: new Date().toISOString(),
     };
-    this.data.signals.unshift(record);
-    if (this.data.signals.length > 500) {
-      this.data.signals = this.data.signals.slice(0, 500);
-    }
-    this.persist(this.data);
+    const col = await getSignalsCollection();
+    await col.insertOne(record);
     return record;
   }
 
-  public getSignals(limit = 50): SignalRecord[] {
-    return this.data.signals.slice(0, limit);
+  public async getSignals(limit = 50): Promise<SignalRecord[]> {
+    const col = await getSignalsCollection();
+    const docs = await col.find({}).sort({ created_at: -1 }).limit(limit).toArray();
+    return docs.map(toSignal);
   }
 }
 

@@ -1,6 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { LicenseDetails, SignalItem, AppConfig } from '../types.ts';
-import { saveSignalToFirestore, fetchSignalsFromFirestore } from '../services/firebaseDb.ts';
 
 // All license keys are dynamic — created via /api/register-key or /api/admin/create-key.
 // No hardcoded keys are seeded on the client.
@@ -92,7 +91,7 @@ export const BotProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           });
         }
       })
-      .catch(() => {});
+      .catch((error) => console.error('Failed to fetch persisted signals:', error));
   }, []);
 
   // Check active license on startup
@@ -105,7 +104,11 @@ export const BotProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key: savedKey, device: deviceId }),
       })
-        .then((res) => res.json())
+        .then(async (res) => {
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'License verification is unavailable.');
+          return data;
+        })
         .then((data) => {
           if (data.ok && data.license) {
             setActiveLicense(savedKey);
@@ -123,8 +126,10 @@ export const BotProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             }
           }
         })
-        .catch(() => {
-          setActiveLicense(savedKey);
+        .catch((error) => {
+          console.error('Could not verify the saved license:', error);
+          setActiveLicense(null);
+          setLicenseDetails(null);
         })
         .finally(() => {
           setIsVerifying(false);
@@ -146,24 +151,33 @@ export const BotProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const updated = [sig, ...prev].slice(0, 50);
       try {
         localStorage.setItem('frk_signals', JSON.stringify(updated));
-      } catch {}
+      } catch (error) {
+        console.warn('Could not cache signals locally:', error);
+      }
       return updated;
     });
 
-    // Also persist to server database & Firebase Firestore
-    saveSignalToFirestore(sig).catch(() => {});
     fetch('/api/signals', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ signal: sig }),
-    }).catch(() => {});
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          throw new Error(data.error || 'Failed to save signal.');
+        }
+      })
+      .catch((error) => console.error('Failed to save signal:', error));
   };
 
   const clearSignals = () => {
     setSignals([]);
     try {
       localStorage.removeItem('frk_signals');
-    } catch {}
+    } catch (error) {
+      console.warn('Could not clear the local signal cache:', error);
+    }
   };
 
   const activateKey = (key: string, details?: LicenseDetails) => {

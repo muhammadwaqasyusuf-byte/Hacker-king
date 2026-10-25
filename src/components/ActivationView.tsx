@@ -1,7 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { useBot } from '../context/BotContext.tsx';
 import { DEV_HANDLE } from '../constants.ts';
-import { saveLicenseToFirestore, bindDeviceInFirestore } from '../services/firebaseDb.ts';
 import {
   KeyRound,
   UserPlus,
@@ -58,9 +57,6 @@ export const ActivationView: React.FC = () => {
     setIsLoading(true);
     setErrorMsg('');
 
-    let verified = false;
-
-    // 1. Try serverless API verification
     try {
       const res = await fetch('/api/verify-key', {
         method: 'POST',
@@ -72,40 +68,17 @@ export const ActivationView: React.FC = () => {
       });
 
       const data = await res.json();
-      if (data.ok) {
+      if (res.ok && data.ok) {
         activateKey(rawKey, data.license);
-        verified = true;
-        setIsLoading(false);
-        return;
-      } else if (data.error && !data.error.toLowerCase().includes('not found')) {
-        setErrorMsg(data.error);
-        setIsLoading(false);
         return;
       }
-    } catch {
-      // Backend unreachable or offline, continue to Firestore cloud check
+      setErrorMsg(data.error || 'License verification failed.');
+    } catch (error) {
+      console.error('License verification request failed:', error);
+      setErrorMsg('Unable to reach the server. Check your connection and try again.');
+    } finally {
+      setIsLoading(false);
     }
-
-    // 2. Cloud Database (Firestore) direct fallback
-    if (!verified) {
-      try {
-        const cloudResult = await bindDeviceInFirestore(rawKey, deviceId);
-        if (cloudResult.ok && cloudResult.license) {
-          activateKey(rawKey, cloudResult.license);
-          setIsLoading(false);
-          return;
-        } else if (cloudResult.error && !cloudResult.error.toLowerCase().includes('not found')) {
-          setErrorMsg(cloudResult.error);
-          setIsLoading(false);
-          return;
-        }
-      } catch {
-        // Firestore error handled below
-      }
-    }
-
-    setErrorMsg('License key not found. Please register or contact @codetrader to purchase.');
-    setIsLoading(false);
   };
 
   const handleRegister = async () => {
@@ -125,11 +98,8 @@ export const ActivationView: React.FC = () => {
       });
 
       const data = await res.json();
-      if (data.ok && data.key) {
+      if (res.ok && data.ok && data.key) {
         setGeneratedKey(data.key);
-        if (data.license) {
-          saveLicenseToFirestore(data.license).catch(() => {});
-        }
       } else {
         setErrorMsg(data.error || 'Registration failed.');
       }
