@@ -138,13 +138,45 @@ export async function updateLicenseInFirestore(
   }
 }
 
-export async function deleteLicenseFromFirestore(licId: string): Promise<void> {
+/**
+ * Deletes a license from Firestore completely.
+ * The doc may exist under `lic.id` OR under `license_key` as the document ID
+ * (saveLicenseToFirestore uses `lic.id || lic.license_key`), and older syncs
+ * may have written either. We remove BOTH so a deleted key can never be
+ * resurrected by the Firestore merge in AdminView.fetchKeys().
+ * Returns true if the delete completed without a cloud error.
+ */
+export async function deleteLicenseFromFirestore(licIdOrKey: string): Promise<boolean> {
+  const clean = (licIdOrKey || '').trim();
+  if (!clean) return false;
+
+  let ok = true;
+
+  // 1. Delete by document ID (covers docs saved with lic.id or license_key as ID)
   try {
-    const docRef = doc(firestore, 'licenses', licId);
-    await deleteDoc(docRef);
+    await deleteDoc(doc(firestore, 'licenses', clean));
   } catch (err) {
-    console.warn('Firestore license delete warning:', err);
+    console.warn('Firestore license delete (by id) warning:', err);
+    // Doc might exist under the other ID — don't fail the whole delete yet.
   }
+
+  // 2. Query and delete ANY docs whose license_key matches (covers every ID scheme)
+  try {
+    const cleanKey = clean.toUpperCase();
+    const q = query(
+      collection(firestore, 'licenses'),
+      where('license_key', '==', cleanKey)
+    );
+    const snapshot = await getDocs(q);
+    if (!snapshot.empty) {
+      await Promise.all(snapshot.docs.map((d) => deleteDoc(d.ref)));
+    }
+  } catch (err) {
+    console.warn('Firestore license delete (by key) warning:', err);
+    ok = false;
+  }
+
+  return ok;
 }
 
 export async function saveSignalToFirestore(sig: SignalItem): Promise<void> {

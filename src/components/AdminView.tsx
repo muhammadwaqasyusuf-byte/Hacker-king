@@ -240,8 +240,15 @@ export const AdminView: React.FC = () => {
       const data = await res.json();
       if (data.ok) {
         if (action === 'delete') {
-          deleteLicenseFromFirestore(licId).catch(() => {});
-          setSuccessMessage('License key deleted successfully.');
+          // Wait for the cloud delete to fully complete BEFORE refetching,
+          // otherwise fetchKeys() merges the still-existing Firestore doc
+          // back into the list (the "deleted key reappears" bug).
+          const cloudOk = await deleteLicenseFromFirestore(licId).catch(() => false);
+          if (!cloudOk) {
+            setErrorMessage('Local delete succeeded, but cloud delete failed. The key may reappear on next refresh — try deleting again.');
+          } else {
+            setSuccessMessage('License key deleted successfully from server and cloud.');
+          }
         } else if (action === 'reset_devices') {
           updateLicenseInFirestore(licId, { license_devices: [] }).catch(() => {});
           setSuccessMessage('All bound devices reset successfully for this key.');
